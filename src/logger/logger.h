@@ -40,7 +40,7 @@ private:
 };
 
 // return bool
-#define LOG_DUMP() Logger::Instance()->dumpLog(msg)
+#define LOG_DUMP() Logger::Instance()->dumpLog()
 
 #define LOG_SET_FUNC_LINE_FORMAT
 

@@ -7,6 +7,9 @@
 
 #include "logger/logger.h"
 
+// 1mb size of buffer
+static constexpr size_t fixed_size_ss_buf = 1024 * 1024;
+
 static Logger* m_instance = nullptr;
 
 static std::atomic_bool quit = false;
@@ -93,6 +96,12 @@ void Logger::logMsgAdd(std::string&& message, DateTime&& date, Logger::MsgLvl ml
             << msgLvlMapper(mlvl)
             << std::move(message)  // may be user already send '\n' symbol, --TODO add replacing
             << std::endl;
+        const size_t ss_buf_size = ss_buf.str().length();
+        if (ss_buf_size > fixed_size_ss_buf) {
+            // buff rotation (clear old logs data)
+            const size_t new_start = ss_buf.str().find('\n', ss_buf_size - fixed_size_ss_buf);
+            ss_buf.str(ss_buf.str().substr(new_start, ss_buf_size - new_start));
+        }
     }
 }
 
@@ -141,8 +150,6 @@ Logger::Logger()
 {
     m_thread = new std::thread( Logger::loggerWorker, nullptr );
     m_thread->detach();
-    using namespace std::chrono_literals;
-    std::this_thread::sleep_for(2s);
 };
 
 Logger::~Logger()
