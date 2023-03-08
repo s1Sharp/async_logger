@@ -8,22 +8,13 @@
 #include <future>
 #include <map>
 
+
 using DateTime = std::chrono::system_clock::time_point;
-
-using args = std::tuple<
-        std::string,
-        DateTime
-        >;
-
-
-std::condition_variable cv;
-std::mutex cv_m;
-std::atomic_bool quit;
-
 
 class Logger;
 
 static Logger* m_instance = nullptr;
+static std::condition_variable cv;
 
 class Logger {
 public:
@@ -52,45 +43,91 @@ public:
         INFO, DEBUG, ERROR
     };
 
+    using args = std::tuple<
+        std::string,
+        DateTime,
+        Logger::MsgLvl
+        >;
 
 
     std::string msgLvlMapper(Logger::MsgLvl mlvl) 
     {
         static std::map<Logger::MsgLvl, std::string> msgLvlMapper = {
-            {Logger::MsgLvl::INFO, "INFO"},
+            {Logger::MsgLvl::INFO , "INFO "},
             {Logger::MsgLvl::DEBUG, "DEBUG"},
             {Logger::MsgLvl::ERROR, "ERROR"},
         };
         return msgLvlMapper[mlvl];
     }
 
-    void logMsgAdd(const std::string& message) 
+    void logMsgAdd(std::string&& message, DateTime&& date, Logger::MsgLvl mlvl) 
     {
-
+        msgs.emplace(std::move(message), std::move(date), mlvl);
+        cv.notify_all();
     }
 
-    void info(const std::string& message)
+    void info(std::string&& message)
     {
+        os << "   info: " << message << std::endl;
+        auto in_time_t = std::chrono::system_clock::to_time_t(getChronoDateTime());
+
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&in_time_t), "%d/%m/%y %X");
+
+        os << "   info: " << message <<ss.str() << std::endl;
+        logMsgAdd(std::move(message), std::move(getChronoDateTime()), Logger::MsgLvl::INFO);
+
+    };
+
+    void debug(std::string&& message)
+    {
+        logMsgAdd(std::move(message), std::move(getChronoDateTime()), Logger::MsgLvl::DEBUG);
         os << "   info: " << message << std::endl;
     };
 
-    void debug(const std::string& message)
+    void error(std::string&& message)
     {
-        os << "   info: " << message << std::endl;
-    };
-
-    void error(const std::string& message)
-    {
+        logMsgAdd(std::move(message), std::move(getChronoDateTime()), Logger::MsgLvl::ERROR);
         os << "warning: " << message << std::endl;
     };
+
+private:
+    inline DateTime getChronoDateTime()
+    {
+        return std::chrono::system_clock::now();
+    }
+
+    static void loggerWorker(std::queue<args>& q)
+    {
+        std::mutex cv_m;
+        std::atomic_bool quit = false;
+        
+        while (!quit) {
+            std::unique_lock<std::mutex> lk(cv_m);
+            //std::cerr << std::this_thread::get_id() << " waiting... " << std::endl;
+            cv.wait(lk, [&q, &quit]() { return !q.empty() || quit; });
+
+            if (!q.empty()) {
+                auto [msg, date, lvl] = std::move(q.front());
+                q.pop();
+                auto s = q.size();
+                lk.unlock();
+                std::cerr << std::this_thread::get_id() << " pop=" << msg << " size=" << s << std::endl;
+            }
+        }
+    }
 
 private:
     std::ofstream           m_File;
 
     Logger():os{std::cerr} {
-
+        std::thread t1(Logger::loggerWorker, std::ref(msgs));
+        t1.detach();
+        using namespace std::chrono_literals;
+        std::this_thread::sleep_for(2s);
     };
-
     std::queue<args> msgs;
     std::ostream& os;
 };
+
+
