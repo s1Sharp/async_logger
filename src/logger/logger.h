@@ -7,7 +7,7 @@
 #include <thread>
 #include <future>
 #include <map>
-
+#include <filesystem>
 
 using DateTime = std::chrono::system_clock::time_point;
 
@@ -15,7 +15,10 @@ class Logger;
 
 static Logger* m_instance = nullptr;
 static std::condition_variable cv;
-
+static std::atomic_bool quit = false;
+static std::atomic_bool dump_log = false;
+static std::mutex buf_m;
+static std::stringstream ss_buf;
 class Logger {
 public:
     Logger(const Logger& root) = delete;
@@ -39,95 +42,130 @@ public:
         return m_instance;
     }
 
-    enum class MsgLvl {
-        INFO, DEBUG, ERROR
-    };
-
-    using args = std::tuple<
-        std::string,
-        DateTime,
-        Logger::MsgLvl
-        >;
-
-
-    std::string msgLvlMapper(Logger::MsgLvl mlvl) 
+    
+    bool dumpLog() 
     {
-        static std::map<Logger::MsgLvl, std::string> msgLvlMapper = {
-            {Logger::MsgLvl::INFO , "INFO "},
-            {Logger::MsgLvl::DEBUG, "DEBUG"},
-            {Logger::MsgLvl::ERROR, "ERROR"},
-        };
-        return msgLvlMapper[mlvl];
-    }
+        static size_t last_dump_unix_time = 0;
+        using namespace std::chrono;
+        const size_t curr_unix_time =
+            duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
 
-    void logMsgAdd(std::string&& message, DateTime&& date, Logger::MsgLvl mlvl) 
-    {
-        msgs.emplace(std::move(message), std::move(date), mlvl);
-        cv.notify_all();
+        // prevent massive log dumping (this is design. We also can append information at the end of file, but ..)
+        if (last_dump_unix_time < curr_unix_time) {
+            last_dump_unix_time = curr_unix_time;
+            dump_log = true;
+            cv.notify_all();
+            return true;
+        }
+        return false;
     }
 
     void info(std::string&& message)
     {
-        os << "   info: " << message << std::endl;
-        auto in_time_t = std::chrono::system_clock::to_time_t(getChronoDateTime());
-
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&in_time_t), "%d/%m/%y %X");
-
-        os << "   info: " << message <<ss.str() << std::endl;
         logMsgAdd(std::move(message), std::move(getChronoDateTime()), Logger::MsgLvl::INFO);
-
     };
 
     void debug(std::string&& message)
     {
         logMsgAdd(std::move(message), std::move(getChronoDateTime()), Logger::MsgLvl::DEBUG);
-        os << "   info: " << message << std::endl;
     };
 
     void error(std::string&& message)
     {
         logMsgAdd(std::move(message), std::move(getChronoDateTime()), Logger::MsgLvl::ERROR);
-        os << "warning: " << message << std::endl;
     };
 
 private:
+    enum class MsgLvl {
+        INFO, DEBUG, ERROR
+    };
+
+    std::string msgLvlMapper(Logger::MsgLvl mlvl) 
+    {
+        static std::map<Logger::MsgLvl, std::string> msgLvlMapper = {
+            {Logger::MsgLvl::INFO , "[INFO]  "},
+            {Logger::MsgLvl::DEBUG, "[DEBUG] "},
+            {Logger::MsgLvl::ERROR, "[ERROR] "},
+        };
+        return msgLvlMapper[mlvl];
+    }
+
     inline DateTime getChronoDateTime()
     {
         return std::chrono::system_clock::now();
     }
 
-    static void loggerWorker(std::queue<args>& q)
+    void logMsgAdd(std::string&& message, DateTime&& date, Logger::MsgLvl mlvl) 
+    {
+        const auto in_time_t = std::chrono::system_clock::to_time_t(date);
+        {
+            std::unique_lock<std::mutex> f_lk(buf_m);
+            ss_buf
+                << std::put_time(std::localtime(&in_time_t), "%d/%m/%y %X ")
+                << msgLvlMapper(mlvl)
+                << std::move(message)  // may be user already send '\n' symbol, --TODO add replacing
+                << std::endl;
+        }
+    }
+
+    static void writeIntoFile(const std::string& str)
+    {
+        using namespace std::chrono;
+        const size_t unix_time = 
+            duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
+        
+        const std::string filename = std::format("logs_{}.txt", unix_time);
+        std::filesystem::path path{ std::filesystem::current_path() / "logs" };
+        path /= filename;
+        std::filesystem::create_directories(path.parent_path());
+
+        std::ofstream ofs(path);
+        ofs << str;
+        ofs.close();
+    }
+
+    static void loggerWorker(void *)
     {
         std::mutex cv_m;
-        std::atomic_bool quit = false;
-        
         while (!quit) {
             std::unique_lock<std::mutex> lk(cv_m);
-            //std::cerr << std::this_thread::get_id() << " waiting... " << std::endl;
-            cv.wait(lk, [&q, &quit]() { return !q.empty() || quit; });
+            cv.wait(lk, []() { 
+                return dump_log || quit;
+            });
 
-            if (!q.empty()) {
-                auto [msg, date, lvl] = std::move(q.front());
-                q.pop();
-                auto s = q.size();
-                lk.unlock();
-                std::cerr << std::this_thread::get_id() << " pop=" << msg << " size=" << s << std::endl;
+            if (dump_log) {
+                std::string file_write_buf;
+                { // get string from log buf with mutex
+                    std::unique_lock<std::mutex> f_lk(buf_m);
+                    file_write_buf = std::move(ss_buf.str());
+                    ss_buf.str("");
+                } // after clear buffer unlock mutex
+                // use string for dump into logfile.txt
+                writeIntoFile(file_write_buf);
+                dump_log = false;
             }
         }
     }
 
-private:
-    std::ofstream           m_File;
-
-    Logger():os{std::cerr} {
-        std::thread t1(Logger::loggerWorker, std::ref(msgs));
-        t1.detach();
+    Logger()
+    {
+        m_thread = new std::thread( Logger::loggerWorker, nullptr );
+        m_thread->detach();
         using namespace std::chrono_literals;
         std::this_thread::sleep_for(2s);
     };
-    std::queue<args> msgs;
-    std::ostream& os;
+
+    ~Logger()
+    {
+        quit = true;
+        if (m_thread->joinable())
+        {
+            m_thread->join();
+        }
+        cv.notify_all();
+    }
+private:
+    std::thread *m_thread;   
 };
 
 
