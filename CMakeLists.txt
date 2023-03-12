@@ -61,3 +61,47 @@ foreach(dir ${dirs})
   message(STATUS "dir='${dir}'")
 endforeach()
 
+
+################################
+# GTest
+################################
+
+file(GLOB_RECURSE TEST_SOURCES test/*.cpp test/*.cc)
+file(GLOB_RECURSE TEST_HEADERS test/*.hpp test/*.h)
+
+include(FetchContent)
+FetchContent_Declare(
+  googletest
+  GIT_REPOSITORY https://github.com/google/googletest.git
+  GIT_TAG release-1.12.1
+)
+
+# For Windows: Prevent overriding the parent project's compiler/linker settings
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+enable_testing()
+
+add_executable(
+  Google_Tests_run
+  ${TEST_SOURCES}
+  ${TEST_HEADERS}
+  ${SOURCES}
+  ${HEADERS}
+)
+
+target_include_directories(Google_Tests_run PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src 
+  ${CMAKE_CURRENT_SOURCE_DIR}/test
+  ${jsoncpp_INCLUDE_DIR}
+)
+
+target_link_libraries(
+  Google_Tests_run
+  GTest::gtest
+  GTest::gmock
+  GTest::gtest_main
+  GTest::gmock_main
+)
+
+include(GoogleTest)
+gtest_discover_tests(Google_Tests_run)
